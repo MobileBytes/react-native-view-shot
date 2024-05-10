@@ -1,5 +1,7 @@
 package fr.greweb.reactnativeviewshot;
 
+import static android.view.View.VISIBLE;
+
 import android.app.Activity;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
@@ -10,10 +12,6 @@ import android.graphics.Point;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Handler;
-import androidx.annotation.IntDef;
-import androidx.annotation.NonNull;
-import androidx.annotation.StringDef;
-
 import android.os.Looper;
 import android.util.Base64;
 import android.util.Log;
@@ -23,6 +21,10 @@ import android.view.TextureView;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.ScrollView;
+
+import androidx.annotation.IntDef;
+import androidx.annotation.NonNull;
+import androidx.annotation.StringDef;
 
 import com.facebook.react.bridge.Promise;
 import com.facebook.react.bridge.ReactApplicationContext;
@@ -46,13 +48,10 @@ import java.util.Set;
 import java.util.WeakHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
-import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.zip.Deflater;
 
 import javax.annotation.Nullable;
-
-import static android.view.View.VISIBLE;
 
 /**
  * Snapshot utility class allow to screenshot a view.
@@ -183,7 +182,7 @@ public class ViewShot implements UIBlock {
     //region Overrides
     @Override
     public void execute(final NativeViewHierarchyManager nativeViewHierarchyManager) {
-        executor.execute(new Runnable () {
+        executor.execute(new Runnable() {
             @Override
             public void run() {
                 try {
@@ -321,29 +320,65 @@ public class ViewShot implements UIBlock {
         return result;
     }
 
-    /**
-     * Wrap {@link #captureViewImpl(View, OutputStream)} call and on end close output stream.
-     */
-    private Point captureView(@NonNull final View view, @NonNull final OutputStream os) throws IOException {
+    private final Handler uiHandler = new Handler(Looper.getMainLooper());
+
+    private Point captureView(@NonNull final View view, @NonNull final OutputStream outputStream) throws IOException {
+        final Point resolutionPoint = new Point();
+        final Bitmap[] returnBitmaps = new Bitmap[1];
+        final CountDownLatch latch = new CountDownLatch(1);
+        uiHandler.post(() -> {
+            try {
+                captureViewImplOnUiThread(view, resolutionPoint, returnBitmaps);
+            } finally {
+                latch.countDown();
+            }
+        });
         try {
-            return captureViewImpl(view, os);
-        } finally {
-            os.close();
+            latch.await();
+        } catch (InterruptedException e) {
+            throw new RuntimeException(String.format("Screenshot failed, because:", e.getMessage()), e);
         }
+
+        if (resolutionPoint.x <= 0 || resolutionPoint.y <= 0) {
+            throw new RuntimeException("Impossible to snapshot the view: view is invalid");
+        }
+        try {
+            int w = resolutionPoint.x;
+            int h = resolutionPoint.y;
+            Bitmap bitmap = returnBitmaps[0];
+            if (width != null && height != null && (width != w || height != h)) {
+                final Bitmap scaledBitmap = Bitmap.createScaledBitmap(bitmap, width, height, true);
+                recycleBitmap(bitmap);
+                bitmap = scaledBitmap;
+            }
+
+            // special case, just save RAW ARGB array without any compression
+            if (Formats.RAW == this.format && outputStream instanceof ReusableByteArrayOutputStream) {
+                final int total = w * h * ARGB_SIZE;
+                final ReusableByteArrayOutputStream rbaos = cast(outputStream);
+                bitmap.copyPixelsToBuffer(rbaos.asBuffer(total));
+                rbaos.setSize(total);
+            } else {
+                final Bitmap.CompressFormat cf = Formats.mapping[this.format];
+
+                bitmap.compress(cf, (int) (100.0 * quality), outputStream);
+            }
+            recycleBitmap(bitmap);
+        } finally {
+            outputStream.close();
+        }
+        return resolutionPoint;
     }
 
     /**
      * Screenshot a view and return the captured bitmap.
-     *
-     * @param view the view to capture
-     * @return screenshot resolution, Width * Height
      */
-    private Point captureViewImpl(@NonNull final View view, @NonNull final OutputStream os) {
+    private void captureViewImplOnUiThread(@NonNull final View view, Point resolutionPoint, Bitmap[] returnBitmaps) {
         int w = view.getWidth();
         int h = view.getHeight();
 
         if (w <= 0 || h <= 0) {
-            throw new RuntimeException("Impossible to snapshot the view: view is invalid");
+            return;
         }
 
         // evaluate real height
@@ -355,7 +390,7 @@ public class ViewShot implements UIBlock {
             }
         }
 
-        final Point resolution = new Point(w, h);
+        resolutionPoint.set(w, h);
         Bitmap bitmap = getBitmapForScreenshot(w, h);
 
         final Paint paint = new Paint();
@@ -394,7 +429,7 @@ public class ViewShot implements UIBlock {
                 c.restoreToCount(countCanvasSave);
                 recycleBitmap(childBitmapBuffer);
             } else if (child instanceof SurfaceView && handleGLSurfaceView) {
-                final SurfaceView svChild = (SurfaceView)child;
+                final SurfaceView svChild = (SurfaceView) child;
                 final CountDownLatch latch = new CountDownLatch(1);
 
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
@@ -410,7 +445,7 @@ public class ViewShot implements UIBlock {
                                 recycleBitmap(childBitmapBuffer);
                                 latch.countDown();
                             }
-                        }, new Handler(Looper.getMainLooper()));
+                        }, uiHandler);
                         latch.await(SURFACE_VIEW_READ_PIXELS_TIMEOUT, TimeUnit.SECONDS);
                     } catch (Exception e) {
                         Log.e(TAG, "Cannot PixelCopy for " + svChild, e);
@@ -423,29 +458,7 @@ public class ViewShot implements UIBlock {
                 }
             }
         }
-
-        if (width != null && height != null && (width != w || height != h)) {
-            final Bitmap scaledBitmap = Bitmap.createScaledBitmap(bitmap, width, height, true);
-            recycleBitmap(bitmap);
-
-            bitmap = scaledBitmap;
-        }
-
-        // special case, just save RAW ARGB array without any compression
-        if (Formats.RAW == this.format && os instanceof ReusableByteArrayOutputStream) {
-            final int total = w * h * ARGB_SIZE;
-            final ReusableByteArrayOutputStream rbaos = cast(os);
-            bitmap.copyPixelsToBuffer(rbaos.asBuffer(total));
-            rbaos.setSize(total);
-        } else {
-            final Bitmap.CompressFormat cf = Formats.mapping[this.format];
-
-            bitmap.compress(cf, (int) (100.0 * quality), os);
-        }
-
-        recycleBitmap(bitmap);
-
-        return resolution; // return image width and height
+        returnBitmaps[0] = bitmap;
     }
 
     /**
