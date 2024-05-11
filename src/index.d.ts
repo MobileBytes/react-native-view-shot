@@ -8,7 +8,7 @@
  * @desc react-native-view-shot.d.ts
  */
 
-declare module 'react-native-view-shot' {
+declare module '@hrpos/react-native-view-shot' {
     import { Component, ReactInstance, RefObject, ReactNode } from 'react'
     import { StyleProp, ViewStyle } from 'react-native'
     import { LayoutChangeEvent } from 'react-native'
