@@ -1,3 +1,7 @@
+> ⚠️ **This repository is archived.** Development has moved to
+> [globalpayments-internal/posrest-react-native-view-shot](https://github.com/globalpayments-internal/posrest-react-native-view-shot).
+> Please use that repository going forward for new development, issues, and pull requests.
+
 # react-native-view-shot ![](https://img.shields.io/npm/v/react-native-view-shot.svg) ![](https://img.shields.io/badge/react--native-%2040+-05F561.svg)
 
 Capture a React Native view to an image.
